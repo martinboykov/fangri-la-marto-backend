@@ -1,5 +1,8 @@
 import { Router, Request, Response } from 'express';
 import { storefrontQuery } from '../utils/shopify-storefront';
+import { AuthRequest } from '../middleware/auth';
+import jwt from 'jsonwebtoken';
+import { AuthPayload } from '../middleware/auth';
 
 const router = Router();
 
@@ -154,7 +157,7 @@ router.delete('/:cartId/lines/:lineId', async (req: Request, res: Response) => {
 });
 
 // PUT /api/cart/:cartId/buyer
-router.put('/:cartId/buyer', async (req: Request, res: Response) => {
+router.put('/:cartId/buyer', async (req: AuthRequest, res: Response) => {
   const mutation = `
     ${CART_FRAGMENT}
     mutation cartBuyerIdentityUpdate($cartId: ID!, $buyerIdentity: CartBuyerIdentityInput!) {
@@ -165,10 +168,28 @@ router.put('/:cartId/buyer', async (req: Request, res: Response) => {
     }
   `;
 
+  const buyerIdentity: Record<string, unknown> = { ...(req.body.buyerIdentity || {}) };
+
+  // If the request carries a valid JWT, inject the Shopify customerAccessToken so
+  // Shopify links the cart to the customer account and pre-fills checkout.
+  const authHeader = req.headers['authorization'];
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const jwtToken = authHeader.slice(7);
+    const secret = process.env.JWT_SECRET;
+    if (secret) {
+      try {
+        const payload = jwt.verify(jwtToken, secret) as AuthPayload;
+        buyerIdentity['customerAccessToken'] = payload.customerAccessToken;
+      } catch {
+        // Invalid/expired token — proceed without linking customer
+      }
+    }
+  }
+
   try {
     const data = await storefrontQuery<{ cartBuyerIdentityUpdate: { cart: unknown } }>(mutation, {
       cartId: req.params.cartId,
-      buyerIdentity: req.body.buyerIdentity,
+      buyerIdentity,
     });
     res.json(data.cartBuyerIdentityUpdate.cart);
   } catch (err) {

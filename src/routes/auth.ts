@@ -19,7 +19,7 @@ router.post('/register', async (req: Request, res: Response) => {
     return;
   }
 
-  const mutation = `
+  const createMutation = `
     mutation customerCreate($input: CustomerCreateInput!) {
       customerCreate(input: $input) {
         customer {
@@ -38,19 +38,62 @@ router.post('/register', async (req: Request, res: Response) => {
   `;
 
   try {
-    const data = await storefrontQuery<{
+    const createData = await storefrontQuery<{
       customerCreate: {
-        customer: { id: string; email: string } | null;
+        customer: { id: string; email: string; firstName?: string; lastName?: string } | null;
         customerUserErrors: { code: string; field: string[]; message: string }[];
       };
-    }>(mutation, { input: { email, password, firstName, lastName } });
+    }>(createMutation, { input: { email, password, firstName, lastName } });
 
-    if (data.customerCreate.customerUserErrors.length > 0) {
-      res.status(422).json({ errors: data.customerCreate.customerUserErrors });
+    if (createData.customerCreate.customerUserErrors.length > 0) {
+      res.status(422).json({ errors: createData.customerCreate.customerUserErrors });
       return;
     }
 
-    res.status(201).json({ customer: data.customerCreate.customer });
+    const customer = createData.customerCreate.customer!;
+
+    // Immediately issue a token so the user is logged in without email verification step
+    const tokenMutation = `
+      mutation customerAccessTokenCreate($input: CustomerAccessTokenCreateInput!) {
+        customerAccessTokenCreate(input: $input) {
+          customerAccessToken {
+            accessToken
+            expiresAt
+          }
+          customerUserErrors {
+            code
+            message
+          }
+        }
+      }
+    `;
+
+    const tokenData = await storefrontQuery<{
+      customerAccessTokenCreate: {
+        customerAccessToken: { accessToken: string; expiresAt: string } | null;
+        customerUserErrors: { code: string; message: string }[];
+      };
+    }>(tokenMutation, { input: { email, password } });
+
+    if (
+      tokenData.customerAccessTokenCreate.customerUserErrors.length > 0 ||
+      !tokenData.customerAccessTokenCreate.customerAccessToken
+    ) {
+      // Account created but could not auto-login (e.g. email verification required)
+      res.status(201).json({ customer });
+      return;
+    }
+
+    const shopifyToken = tokenData.customerAccessTokenCreate.customerAccessToken;
+    const secret = process.env.JWT_SECRET!;
+
+    const jwtToken = jwt.sign(
+      { customerAccessToken: shopifyToken.accessToken, email },
+      secret,
+      { expiresIn: '30d' }
+    );
+
+    res.status(201).json({ customer, token: jwtToken, expiresAt: shopifyToken.expiresAt });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }
